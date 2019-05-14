@@ -15,11 +15,12 @@ def get_current_date():
     return date.today().isoformat()
 
 def backup(localDir):
+    parentDirLocal = '/'.join(localDir.split('/')[:-1])
     backupDate = get_current_date()
-    s3dir = "s3://%s/%s/" % (bucketName, backupDate)
+    s3Dir = "s3://%s/%s%s/" % (bucketName, backupDate, parentDirLocal)
     print "Backing Up %s to %s" % (localDir, s3Dir)
-    print "Command: %s" % cmd
     cmd = "s3cmd sync %s %s" % (localDir, s3Dir)
+    print "Command: %s" % cmd
     if run_cmd(cmd):
         print "Backup Successful!"
     else:
@@ -28,7 +29,7 @@ def backup(localDir):
 def restore(localDir, restoreDate):
     parentDirLocal = '/'.join(localDir.split('/')[:-1])
     directory = localDir.split('/')[-1]
-    s3Dir = "s3://%s/%s/%s" % (bucketName, restoreDate, directory)
+    s3Dir = "s3://%s/%s%s" % (bucketName, restoreDate, localDir)
     print "Restoring %s to %s/%s from date %s" % (s3Dir, parentDirLocal, \
             directory, restoreDate)
     cmd = "s3cmd sync %s %s" % (s3Dir, parentDirLocal)
