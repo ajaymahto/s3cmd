@@ -2,25 +2,32 @@
 
 import os
 import sys
-import errno
+import shlex
 import argparse
 
 from subprocess import Popen, PIPE
 from datetime import date
 
 bucketName = 'ajay-test-bucket01'
-parser = argparse.ArgumentParser()
 
 def get_current_date():
     return date.today().isoformat()
 
 def backup(localDir):
+    print 'Placing .s3keep file in empty paths.'
+    cmd = 'find %s -type d -empty -not -path "./.git/*" -exec touch {}/.s3keep \;' % localDir
+    
+    if run_cmd(cmd):
+        print 'Empty dir filling success!'
+    else:
+        print 'Empty dir filling failed!'
     parentDirLocal = '/'.join(localDir.split('/')[:-1])
     backupDate = get_current_date()
     s3Dir = "s3://%s/%s%s/" % (bucketName, backupDate, parentDirLocal)
     print "Backing Up %s to %s" % (localDir, s3Dir)
     cmd = "s3cmd sync %s %s" % (localDir, s3Dir)
     print "Command: %s" % cmd
+    
     if run_cmd(cmd):
         print "Backup Successful!"
     else:
@@ -34,36 +41,38 @@ def restore(localDir, restoreDate):
             directory, restoreDate)
     cmd = "s3cmd sync %s %s" % (s3Dir, parentDirLocal)
     print "Command: %s" % cmd
+    
     if run_cmd(cmd):
         print 'Restore Success!'
     else:
         print 'Restore Fail!'
 
 def run_cmd(cmd):
-    p = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE)
+    cmd_list = shlex.split(cmd)
+    p = Popen(cmd_list, stdout=PIPE, stderr=PIPE)
     out, err = p.communicate()
     if err:
         print err
-        return False
     else:
         print out
-        return True
+    return p.returncode == 0
 
 def exit(exitcode):
     print "---"
     parser.print_help(sys.stderr)
     sys.exit(exitcode)
 
-def program_exists(name):
-    p = Popen(['/usr/bin/which', name], stdout=PIPE, stderr=PIPE)
-    p.communicate()
-    return p.returncode == 0
+def program_exists(program):
+    cmd = '/usr/bin/which %s' % program
+    return run_cmd(cmd)
 
 def main():
+    parser = argparse.ArgumentParser()
     parser.add_argument('-d', '--directory', help='directory to be backed up \
             or restored to. Absolute path.')
     parser.add_argument('-b', '--backup', action='store_true')
-    parser.add_argument('-l', '--list', action='store_true')
+    parser.add_argument('-l', '--list', action='store_true', help='List all \
+            objects in the path')
     parser.add_argument('-r', '--restore', action='store_true')
     parser.add_argument('-t', '--date', help='date from which to restore.')
     args = parser.parse_args()
@@ -77,7 +86,7 @@ def main():
         sys.exit(1)
 
     if args.list:
-        print "Dirs under bucket: %s" % bucketName
+        print "Dirs under s3path: %s" % bucketName
         cmd = "s3cmd ls s3://%s" % bucketName
         run_cmd(cmd)
         sys.exit(0)
@@ -86,7 +95,7 @@ def main():
         exit(1)
     else:
         if args.backup and args.restore:
-            print "Too many flags set. Select one of (-b/--backup, -r/--restore)"
+            print "Too many flags. Select one of (-b/--backup, -r/--restore)"
             exit(1)
         elif not args.backup and not args.restore:
             print "Missing flag. Select one of (-b/--backup, -r/--restore)"
