@@ -1,0 +1,368 @@
+#! /usr/bin/env python
+
+import argparse
+import logging
+import os
+import shlex
+import sys
+
+from datetime import date
+from subprocess import Popen, PIPE
+
+retention_days = 10
+loggingDir = "/var/log/s3util"
+bucketName = 'test-bucket'
+parser = argparse.ArgumentParser()
+
+"""
+Setting up logging.
+"""
+if not os.path.exists(loggingDir):
+    os.makedirs(loggingDir)
+logging.basicConfig(filename="/var/log/s3util/s3util.log", 
+                    format='%(asctime)s %(message)s', 
+                    filemode='a+') 
+logger=logging.getLogger() 
+logger.setLevel(logging.DEBUG)
+
+def get_current_date():
+    """
+    Function to get the current date.
+    Required for creating the s3key for backup.
+    """
+    return date.today().isoformat()
+
+def create_s3keep(datestamp):
+    """
+    Placing a hidden file named .s3keep in every dir recursively.
+    This is required to ensure the exact dir structure,
+    as s3 does not allow empty path while uploading objects.
+    """
+    with open(".s3keep", "w") as f:
+        f.write(str(datestamp))
+
+def get_output(cmd):
+    """
+    Function to run shell commands that contain pipes.
+    shell=True
+    """
+    p = Popen(cmd, shell=True, stderr=PIPE, stdout=PIPE)
+    out, err = p.communicate()
+    if out:
+        ret = out.strip()
+    else:
+        ret = None
+    return ret
+
+def get_instance_id():
+    """
+    Function to return instance_id, fetched using curl.
+    This is required as instance_id is begin used as a prt of the
+    s3key for storing backup.
+    """
+    cmd = "curl http://169.254.169.254/latest/meta-data/instance-id"
+    return get_output(cmd)
+
+def get_latest_backup_date(localDir):
+    """
+    Function to fetch the lastest date when the given directory in the current 
+    instance was backed up.
+    """
+    ins_id = get_instance_id()
+    cmd = "s3cmd ls s3://%s/%s | grep %s | awk '{print $1}' | sort | uniq | \
+            head -n 1" % (bucketName, ins_id, localDir)
+    return get_output(cmd)
+
+def backup(localDir):
+    """
+    Function to backup.
+    s3cmd is being used internally to sync directory into s3 bucket.
+    s3cmd sync ensures both syncing of files to and from s3 with proper
+    encryption if enabled.
+    s3cmd needs to be configured beforehand with proper parameters for this 
+    function to work.
+    Steps:
+    1. Places .s3keep file into every directory in the dir structure.
+    2. Syncs path into s3 using s3cmd sync.
+    Note: This version of s3cmd uses multipart upload for larger files.
+    """
+    if not os.path.exists(localDir):
+        msg = "Missing source dir %s" % args.path
+        print msg
+        logger.error(msg)
+        exit(1)
+    ins_id = get_instance_id()
+    msg = 'Placing .s3keep file in all paths.'
+    logger.info(msg)
+    today = get_current_date()
+    create_s3keep(today)
+    cmd = 'find %s -type d -not -path "./.git/*" \
+            -exec cp ./.s3keep {}/.s3keep \;' % localDir
+    
+    if run_cmd(cmd):
+        msg = '.s3keep placement success!'
+        logger.info(msg)
+    else:
+        msg = '.s3keep placement failed!'
+        logger.warning(msg)
+    parentDirLocal = '/'.join(localDir.split('/')[:-1])
+    backupDate = get_current_date()
+    s3Dir = "s3://%s/%s/%s%s/" % (bucketName, ins_id, backupDate, \
+            parentDirLocal)
+    msg = "Backing Up %s to %s" % (localDir, s3Dir)
+    print msg
+    logger.info(msg)
+    cmd = "s3cmd sync %s %s" % (localDir, s3Dir)
+    msg = "Command: %s" % cmd
+    logger.info(msg)
+    
+    if run_cmd(cmd):
+        msg = "Backup Successful!"
+        print msg
+        logger.info(msg)
+        msg = "Removing Old Backups. Retention Days Set To : %s days" % \
+                retention_days
+        print msg
+        logger.info(msg)
+        remove_old_backups(localDir)
+    else:
+        msg = "Backup Failed!"
+        print msg
+        logger.info(msg)
+
+def restore(localDir, restoreDate):
+    """
+    Function to restore directory from s3 into local system.
+    restoreDate - Required parameter.
+    s3cmd sync is being used internally to sync directory from s3 bucket.
+    s3cmd needs to be configured beforehand for this function to work.
+    Steps:
+    1. Syncs s3 dir strucure into local disk using s3cmd sync.
+    """
+    ins_id = get_instance_id()
+    parentDirLocal = '/'.join(localDir.split('/')[:-1])
+    directory = localDir.split('/')[-1]
+    s3Dir = "s3://%s/%s/%s%s" % (bucketName, ins_id, restoreDate, localDir)
+    msg = "Restoring %s to %s/%s from date %s" % (s3Dir, parentDirLocal, \
+            directory, restoreDate)
+    print msg
+    logger.info(msg)
+    cmd = "s3cmd sync %s %s" % (s3Dir, parentDirLocal)
+    msg = "Command: %s" % cmd
+    logger.info(msg)
+    
+    if run_cmd(cmd):
+        msg = 'Restore Success!'
+        print msg
+        logger.info(msg)
+    else:
+        msg = 'Restore Fail!'
+        print msg
+        logger.error(msg)
+
+def run_cmd(cmd):
+    """
+    Function to run shell command and return success or failure status using
+    returncode parameter.
+    shlex.split() splits commands into lists readable by Popen command. Hence, 
+    avoiding the risk of using shell=True.
+    """
+    ins_id = get_instance_id()
+    cmd_list = shlex.split(cmd)
+    p = Popen(cmd_list, stdout=PIPE, stderr=PIPE)
+    out, err = p.communicate()
+    if err:
+        msg = err
+        logger.error(msg)
+    else:
+        msg = out
+        if " ls " in cmd and ins_id in cmd:
+            print out
+            logger.info(out)
+    return p.returncode == 0
+
+def exit(exitcode):
+    """
+    Function to print help text and then exit with the given exit code.
+    """
+    print "---"
+    parser.print_help(sys.stderr)
+    sys.exit(exitcode)
+
+def program_exists(program):
+    """
+    Function to check if a command exists. 
+    Used to check s3cmd installation.
+    """
+    cmd = '/usr/bin/which %s' % program
+    return run_cmd(cmd)
+
+def get_backup_dates(localDir):
+    """
+    Function to retrieve all dates on which the folder was backed up
+    """
+    ins_id = get_instance_id()
+    cmd = "s3cmd ls s3://%s/%s | grep %s | awk '{print $1}' | sort | uniq" % (\
+            bucketName, ins_id, localDir)
+    dates = get_output(cmd).splitlines()
+    return dates
+
+def remove_path(date, localDir):
+    """
+    Function to remove an s3 path. This is being used to remove old backups based on 
+    retention_days parameter. Default value for retention_days=10
+    """
+    ins_id = get_instance_id()
+    cmd = "s3 del -r s3://%s/%s/%s/%s" % (bucketName, ins_id, date, localDir)
+    logger.info(cmd)
+
+    if run_cmd(cmd):
+        msg = "Cleared old backups of %s" % date
+        logger.info(msg)
+        return True
+    else:
+        msg = "Failed to clear old backup from %s" % date
+        logger.error(msg)
+        return False
+
+def date_diff(date1, date2):
+    """
+    Function to get difference between two given dates.
+    Use to get date difference while deciding whether to remove
+    old backup or not. Default retention_days=10.
+    """
+    y1, m1, d1 = map(int, date1.split('-'))
+    y2, m2, d2 = map(int, date2.split('-'))
+    d0 = date(y1, m1, d1)
+    d1 = date(y2, m2, d2)
+    delta = d1 - d0
+    return abs(delta.days)
+
+def remove_old_backups(localDir):
+    """
+    Wrapper function to remove all old backups which
+    have crossed the indicated by `retention_days` paramater.
+    """
+    backup_dates = get_backup_dates(localDir)
+    today = get_current_date()
+    for date in backup_dates:
+        if date_diff(today, date) > retention_days:
+            if not remove_path(date, localDir):
+                msg = "Error removing backup for %s" % date
+                logger.warning(msg)
+                break
+    
+def main():
+    """
+    Entrypoint function main()
+    Arguments:
+    -p/--path : Absolute path of the directory to be backed up.
+    -b/--backup: Flag indicating backup option.
+    -l/--list: Flag indicating listing option. Lists all objects under 
+               mentioned s3 path.
+    -r/--restore: Flag indicating restore option.
+    -d/--date: Argument required with -r/--restore flag. Indicates the date
+               from which backup is to be restored.
+    -z/--latest: Alternative option for -d/--date. Indicates latest backup
+                 date as the restore date.
+    -x/--retention: No. of days through which backup needs to be retained.
+    """
+    parser.add_argument('-p', '--path', help='Absolute directory path to be \
+            backed up or restored to.')
+    parser.add_argument('-b', '--backup', action='store_true')
+    parser.add_argument('-l', '--list', action='store_true', help='List all \
+            objects in the path')
+    parser.add_argument('-r', '--restore', action='store_true')
+    parser.add_argument('-z', '--latest', action='store_true', help='Restore \
+            from the latest backup.')
+    parser.add_argument('-d', '--date', help='date from which to restore.')
+    parser.add_argument('-s', '--s3bucket', help='s3bucket to store backups.')
+    parser.add_argument('-x', '--retention_days', help='No. of days to retain \
+            backup. Default 10 days')
+    args = parser.parse_args()
+
+    msg = "\n\n--- Backup Start ---"
+    print msg
+    logger.info(msg)
+
+    if not program_exists('s3cmd'):
+        """
+        Steps to correctly install and configure s3cmd from source(git).
+        """
+        msg = "Missing s3cmd.\n"
+        msg += "Steps to install:\n"
+        msg += "git clone https://github.com/s3tools/s3cmd.git\n"
+        msg += "cd s3cmd && python setup.py install\n"
+        msg += "s3cmd --configure"
+        print msg
+        logger.error(msg)
+        sys.exit(1)
+
+    if args.retention_days:
+        global retention_days
+        retention_days = args.retention_days
+
+    if args.s3bucket:
+        global bucketName
+        bucketName = args.s3bucket
+        cmd = "s3cmd ls s3://%s" % bucketName
+        if not run_cmd(cmd):
+            msg = "Bucket %s does not exist. Creating.." % bucketName
+            print msg
+            logger.info(msg)
+            cmd = "s3cmd mb s3://%s" % bucketName
+            run_cmd(cmd)
+        else:
+            msg = "Bucket %s exists. Skipping creation." % bucketName
+            print msg
+            logger.info(msg)
+    else:
+        msg = "Missing parameter <-s/--s3bucket>. S3 bucket to store backups."
+        print msg
+        logger.error(msg)
+        exit(1)
+
+    if args.list:
+        ins_id = get_instance_id()
+        msg = "Listing under s3path: s3://%s/%s" % (bucketName, ins_id)
+        print msg
+        logger.info(msg)
+        cmd = "s3cmd ls s3://%s/%s" % (bucketName, ins_id)
+        run_cmd(cmd)
+        sys.exit(0)
+
+    if not args.path:
+        msg = "Missing parameters. Set <-p/--path>. Eh?"
+        print msg
+        logger.error(msg)
+        exit(1)
+    else:
+        if args.backup and args.restore:
+            msg = "Too many flags. Select one of (-b/--backup, -r/--restore)"
+            print msg
+            logger.error(msg)
+            exit(1)
+        elif not args.backup and not args.restore:
+            msg = "Missing flag. Select one of (-b/--backup, -r/--restore)"
+            logger.error(msg)
+            exit(1)
+        else:
+            localDir = args.path
+            if args.backup:
+                backup(localDir)
+            elif args.restore:
+                if not args.date and not args.latest:
+                    msg = "Missing paramater. Set <-t/--date>.\n"
+                    msg += "Backup date in YYYY-MM-DD format.\n"
+                    msg += "Set flag <-z/--latest> for latest backup"
+                    print msg
+                    logger.error(msg)
+                    exit(1)
+                elif args.latest:
+                    restoreDate = get_latest_backup_date(localDir)
+                else:
+                    restoreDate = args.date
+                restore(localDir, restoreDate)
+
+if __name__ == '__main__':
+    main()
