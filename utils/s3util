@@ -1,4 +1,7 @@
 #! /usr/bin/env python
+# Script tp sync local directories into s3.
+# Currently using s3 sync to achieve the same.
+# Author: Ajay Mahto <ajay.mahto@grab.com>
 
 import argparse
 import logging
@@ -13,7 +16,8 @@ from subprocess import Popen, PIPE
 region = "ap-southeast-1"
 retention_days = 10
 loggingDir = "/var/log/s3util"
-bucketName = 'test-bucket'
+localDir = "/tmp"
+bucketName = 'ajay-test-bucket01'
 parser = argparse.ArgumentParser()
 
 """
@@ -110,7 +114,7 @@ def backup(localDir):
     msg = "Backing Up %s to %s" % (localDir, s3Dir)
     print msg
     logger.info(msg)
-    cmd = "aws s3 sync %s %s" % (localDir, s3Dir)
+    cmd = "aws s3 sync --delete %s %s" % (localDir, s3Dir)
     msg = "Command: %s" % cmd
     logger.info(msg)
     
@@ -258,6 +262,19 @@ def force(action, remotePath, localPath):
         msg = "Force Backup/Restore Failed!"
     print msg
     logger.info(msg)
+
+def ensure(bucketName):
+        cmd = "aws s3 ls s3://%s" % bucketName
+        if not run_cmd(cmd):
+            esg = "Bucket %s does not exist. Creating.." % bucketName
+            print msg
+            logger.info(msg)
+            cmd = "aws s3 mb --region %s s3://%s" % (region, bucketName)
+            run_cmd(cmd)
+        else:
+            msg = "Bucket %s exists. Skipping creation." % bucketName
+            print msg
+            logger.info(msg)
     
 def main():
     """
@@ -265,7 +282,7 @@ def main():
     Arguments:
     -p/--path : Absolute path of the directory to be backed up.
     -b/--backup: Flag indicating backup option.
-    -l/--list: Flag indicating listing option. Lists all objects under 
+    -l/--list: Flag indicating listing option. Lists all objects under
                mentioned s3 path.
     -r/--restore: Flag indicating restore option.
     -d/--date: Argument required with -r/--restore flag. Indicates the date
@@ -290,9 +307,9 @@ def main():
     parser.add_argument('-s', '--s3bucket', help='s3bucket to store backups.')
     parser.add_argument('-x', '--retention_days', help='No. of days to retain \
             backup. Default 10 days')
-    parser.add_argument('-f', '--force', help='Force sync source and \
-            destination. Required params -p/--path, -o/--remote-path.')
-    parser.add_argument('-o', '--remote-path', help='Remote s3path to restore \
+    parser.add_argument('-f', '--force', action='store_true', help='Force sync source and \
+            destination. Required params -p/--path, -o/--remote.')
+    parser.add_argument('-o', '--remote', help='Remote s3path to restore \
             backup from. This is a required param if -f/--force is set.')
     args = parser.parse_args()
 
@@ -319,17 +336,12 @@ def main():
     if args.s3bucket:
         global bucketName
         bucketName = args.s3bucket
-        cmd = "aws s3 ls s3://%s" % bucketName
-        if not run_cmd(cmd):
-            esg = "Bucket %s does not exist. Creating.." % bucketName
-            print msg
-            logger.info(msg)
-            cmd = "aws s3 mb --region %s s3://%s" % (region, bucketName)
-            run_cmd(cmd)
-        else:
-            msg = "Bucket %s exists. Skipping creation." % bucketName
-            print msg
-            logger.info(msg)
+        ensure(bucketName)
+
+    elif args.force:
+        msg = "Proceeding with mentioned remote"
+        print msg
+        logger.info(msg)
     else:
         msg = "Missing parameter <-s/--s3bucket>. S3 bucket to store backups."
         print msg
@@ -351,6 +363,8 @@ def main():
         logger.error(msg)
         exit(1)
     else:
+        global localDir
+        localDir = args.path.rstrip('/')
         if args.backup and args.restore:
             msg = "Too many flags. Select one of (-b/--backup, -r/--restore)"
             print msg
@@ -358,36 +372,43 @@ def main():
             exit(1)
         elif not args.backup and not args.restore:
             msg = "Missing flag. Select one of (-b/--backup, -r/--restore)"
+            print msg
             logger.error(msg)
             exit(1)
         else:
-            localDir = args.path
             if args.backup:
                 if args.force:
-                    if not args.path or not args.remote-path:
-                        msg = "Missing params -p/--path or -o/--remote-path."
-                        msg += "Both are required params if -f/--force is set."
+                    if not args.remote:
+                        msg = "Missing params -o/--remote."
                         print msg
                         logger.error(msg)
                     else:
-                        remotePath = args.remote-path
-                        localPath = args.path
+                        remotePath = args.remote.rstrip('/')
                         force('backup', remotePath, localPath)
                 else:
                     backup(localDir)
             elif args.restore:
-                if not args.date and not args.latest:
-                    msg = "Missing paramater. Set <-t/--date>.\n"
-                    msg += "Backup date in YYYY-MM-DD format.\n"
-                    msg += "Set flag <-z/--latest> for latest backup"
-                    print msg
-                    logger.error(msg)
-                    exit(1)
-                elif args.latest:
-                    restoreDate = get_latest_backup_date(localDir)
-                else:
-                    restoreDate = args.date
-                restore(localDir, restoreDate)
+		if args.force:
+                    if not args.remote:
+                        msg = "Missing param -o/--remote."
+                        print msg
+                        logger.error(msg)
+                    else:
+                        remotePath = args.remote.rstrip('/')
+                        force('restore', remotePath, localPath)
+		else:
+                    if not args.date and not args.latest:
+                        msg = "Missing paramater. Set <-t/--date>.\n"
+                        msg += "Backup date in YYYY-MM-DD format.\n"
+                        msg += "Set flag <-z/--latest> for latest backup"
+                        print msg
+                        logger.error(msg)
+                        exit(1)
+                    elif args.latest:
+                        restoreDate = get_latest_backup_date(localDir)
+                    else:
+                        restoreDate = args.date
+                    restore(localDir, restoreDate)
 
 if __name__ == '__main__':
     main()
